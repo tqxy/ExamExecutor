@@ -2,19 +2,31 @@
 # -*- coding: utf-8 -*-
 """
 PDF试卷分析模块
-用于分析试卷结构，识别题目数量和边界
+使用Pix2Text+Paddle OCR组合方案分析试卷结构，识别题目数量和边界
 """
 
 import os
 import cv2
 import numpy as np
-import pdfplumber
 from PIL import Image
 import logging
+
+# 添加项目根目录到Python路径
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# 导入OCR模块
+try:
+    from src.main import OCRProcessor
+    OCR_AVAILABLE = True
+    logger.info("成功导入OCR处理器")
+except ImportError as e:
+    OCR_AVAILABLE = False
+    logger.error(f"无法导入OCR处理器: {e}")
 
 class PDFAnalyzer:
     """PDF试卷分析器"""
@@ -28,10 +40,11 @@ class PDFAnalyzer:
         """
         self.pdf_path = pdf_path
         self.questions = []
+        self.ocr_processor = OCRProcessor() if OCR_AVAILABLE else None
         
     def pdf_to_images(self, output_dir="pdf_pages"):
         """
-        将PDF转换为图像
+        将PDF转换为图像（使用PyPDF2）
         
         Args:
             output_dir (str): 输出目录
@@ -47,46 +60,40 @@ class PDFAnalyzer:
         image_paths = []
         
         try:
-            with pdfplumber.open(self.pdf_path) as pdf:
-                for i, page in enumerate(pdf.pages):
-                    logger.info(f"正在处理第 {i+1} 页...")
-                    
-                    # 尝试不同的转换方法
-                    try:
-                        # 方法1: 使用pdfplumber的to_image
-                        im = page.to_image(resolution=200)
-                        image_path = os.path.join(output_dir, f"page_{i+1}.png")
-                        im.save(image_path)
-                    except Exception as e:
-                        logger.warning(f"使用to_image转换第 {i+1} 页失败: {e}")
-                        # 方法2: 使用crop和to_image的组合
-                        try:
-                            # 获取页面尺寸
-                            bbox = page.bbox
-                            im = page.to_image(resolution=200)
-                            image_path = os.path.join(output_dir, f"page_{i+1}.png")
-                            im.save(image_path)
-                        except Exception as e2:
-                            logger.warning(f"使用备用方法转换第 {i+1} 页也失败: {e2}")
-                            # 方法3: 创建空白图像作为占位符
-                            image_path = os.path.join(output_dir, f"page_{i+1}_placeholder.png")
-                            # 创建白色背景图像
-                            placeholder = Image.new('RGB', (1600, 2000), color='white')
-                            placeholder.save(image_path)
-                            logger.info(f"为第 {i+1} 页创建了占位符图像")
-                    
-                    # 检查图像是否有效
-                    if os.path.exists(image_path):
-                        # 检查文件大小
-                        file_size = os.path.getsize(image_path)
-                        if file_size > 1000:  # 大于1KB认为是有效图像
-                            image_paths.append(image_path)
-                            logger.info(f"已保存页面 {i+1} 到 {image_path} (大小: {file_size} bytes)")
-                        else:
-                            logger.warning(f"页面 {i+1} 的图像文件太小 ({file_size} bytes)，可能为空白页面")
-                    else:
-                        logger.error(f"页面 {i+1} 的图像文件未创建成功")
-                    
+            import PyPDF2
+            from pdf2image import convert_from_path
+            
+            # 使用pdf2image转换PDF为图像
+            pages = convert_from_path(self.pdf_path, dpi=200, output_folder=output_dir, 
+                                    output_file="page", fmt="png", thread_count=4)
+            
+            # 重命名文件以符合我们的命名规范
+            for i, page in enumerate(pages):
+                image_path = os.path.join(output_dir, f"page_{i+1}.png")
+                if not os.path.exists(image_path):
+                    page.save(image_path, "PNG")
+                image_paths.append(image_path)
+                logger.info(f"已保存页面 {i+1} 到 {image_path}")
+                
+        except ImportError:
+            logger.warning("pdf2image未安装，尝试使用备用方法...")
+            # 安装pdf2image后再试
+            try:
+                import subprocess
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "pdf2image"])
+                from pdf2image import convert_from_path
+                pages = convert_from_path(self.pdf_path, dpi=200, output_folder=output_dir, 
+                                        output_file="page", fmt="png", thread_count=4)
+                
+                for i, page in enumerate(pages):
+                    image_path = os.path.join(output_dir, f"page_{i+1}.png")
+                    if not os.path.exists(image_path):
+                        page.save(image_path, "PNG")
+                    image_paths.append(image_path)
+                    logger.info(f"已保存页面 {i+1} 到 {image_path}")
+            except Exception as e:
+                logger.error(f"PDF转换图像时出错: {e}")
+                return []
         except Exception as e:
             logger.error(f"PDF转换图像时出错: {e}")
             return []
@@ -96,7 +103,7 @@ class PDFAnalyzer:
     
     def detect_question_boundaries(self, image_path):
         """
-        检测题目边界
+        检测题目边界（使用OCR辅助检测）
         
         Args:
             image_path (str): 图像文件路径
@@ -115,6 +122,122 @@ class PDFAnalyzer:
         # 获取图像尺寸
         height, width = image.shape[:2]
         logger.info(f"图像尺寸: {width} x {height}")
+        
+        # 使用OCR处理器进行文本检测
+        if self.ocr_processor and OCR_AVAILABLE:
+            try:
+                # 对整个页面进行OCR处理
+                result = self.ocr_processor.process_image(image_path)
+                
+                # 从OCR结果中提取文本框
+                text_boxes = []
+                if 'paddleocr_result' in result:
+                    text_recognition = result['paddleocr_result'].get('text_recognition', {})
+                    boxes = text_recognition.get('boxes', [])
+                    texts = text_recognition.get('texts', [])
+                    scores = text_recognition.get('scores', [])
+                    
+                    for box, text, score in zip(boxes, texts, scores):
+                        if score > 0.5 and len(text.strip()) > 0:  # 置信度阈值
+                            # 转换box格式为边界框
+                            points = np.array(box)
+                            x_min, y_min = np.min(points, axis=0)
+                            x_max, y_max = np.max(points, axis=0)
+                            w, h = x_max - x_min, y_max - y_min
+                            text_boxes.append((int(x_min), int(y_min), int(w), int(h)))
+                
+                # 根据文本框聚类检测题目区域
+                question_boxes = self._cluster_text_boxes(text_boxes, width, height)
+                logger.info(f"通过OCR检测到 {len(question_boxes)} 个题目区域")
+                return question_boxes
+                
+            except Exception as e:
+                logger.warning(f"使用OCR检测题目边界时出错: {e}")
+        
+        # 如果OCR不可用或失败，使用传统的图像处理方法
+        return self._detect_questions_traditional(image)
+    
+    def _cluster_text_boxes(self, text_boxes, image_width, image_height):
+        """
+        根据文本框聚类检测题目区域
+        
+        Args:
+            text_boxes (list): 文本框列表
+            image_width (int): 图像宽度
+            image_height (int): 图像高度
+            
+        Returns:
+            list: 题目边界框列表
+        """
+        if not text_boxes:
+            return []
+        
+        # 按y坐标排序
+        text_boxes.sort(key=lambda box: box[1])
+        
+        # 聚类相邻的文本框
+        clusters = []
+        current_cluster = [text_boxes[0]]
+        line_height = text_boxes[0][3]  # 初始行高
+        
+        for i in range(1, len(text_boxes)):
+            prev_box = current_cluster[-1]
+            curr_box = text_boxes[i]
+            
+            # 计算垂直距离
+            vertical_distance = curr_box[1] - (prev_box[1] + prev_box[3])
+            
+            # 更新行高估计
+            line_height = (line_height + curr_box[3]) / 2
+            
+            # 如果垂直距离大于行高的1.5倍，认为是新的题目开始
+            if vertical_distance > line_height * 1.5:
+                # 保存当前聚类
+                clusters.append(current_cluster)
+                # 开始新的聚类
+                current_cluster = [curr_box]
+            else:
+                # 添加到当前聚类
+                current_cluster.append(curr_box)
+        
+        # 添加最后一个聚类
+        clusters.append(current_cluster)
+        
+        # 为每个聚类生成边界框
+        question_boxes = []
+        for cluster in clusters:
+            if len(cluster) >= 1:  # 至少要有1个文本框
+                x_min = min(box[0] for box in cluster)
+                y_min = min(box[1] for box in cluster)
+                x_max = max(box[0] + box[2] for box in cluster)
+                y_max = max(box[1] + box[3] for box in cluster)
+                
+                # 添加一些边距
+                margin_x, margin_y = 20, 20
+                x_min = max(0, x_min - margin_x)
+                y_min = max(0, y_min - margin_y)
+                x_max = min(image_width, x_max + margin_x)
+                y_max = min(image_height, y_max + margin_y)
+                
+                w, h = x_max - x_min, y_max - y_min
+                
+                # 过滤太小的区域
+                if w > 100 and h > 50:
+                    question_boxes.append((x_min, y_min, w, h))
+        
+        return question_boxes
+    
+    def _detect_questions_traditional(self, image):
+        """
+        传统图像处理方法检测题目边界
+        
+        Args:
+            image (numpy.ndarray): 图像数组
+            
+        Returns:
+            list: 题目边界框列表
+        """
+        height, width = image.shape[:2]
         
         # 转换为灰度图
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -169,7 +292,7 @@ class PDFAnalyzer:
         # 按照y坐标排序
         unique_boxes.sort(key=lambda box: box[1])
         
-        logger.info(f"最终检测到 {len(unique_boxes)} 个题目区域")
+        logger.info(f"传统方法最终检测到 {len(unique_boxes)} 个题目区域")
         return unique_boxes
     
     def _remove_duplicate_boxes(self, boxes, overlap_threshold=0.5):
@@ -218,13 +341,14 @@ class PDFAnalyzer:
         
         return unique_boxes
     
-    def extract_questions(self, image_path, question_boxes):
+    def extract_questions(self, image_path, question_boxes, page_number=1):
         """
         从图像中提取题目
         
         Args:
             image_path (str): 图像文件路径
             question_boxes (list): 题目边界框列表
+            page_number (int): 页码
             
         Returns:
             list: 题目图像路径列表
@@ -248,8 +372,8 @@ class PDFAnalyzer:
             # 裁剪题目区域
             question_img = image[y:y+h, x:x+w]
             
-            # 保存题目图像
-            question_path = os.path.join(questions_dir, f"question_{i+1}.png")
+            # 保存题目图像，使用页码和题目编号避免文件名冲突
+            question_path = os.path.join(questions_dir, f"page_{page_number}_question_{i+1}.png")
             cv2.imwrite(question_path, question_img)
             question_images.append(question_path)
             
@@ -290,7 +414,7 @@ class PDFAnalyzer:
             question_boxes = self.detect_question_boundaries(image_path)
             
             # 提取题目
-            question_images = self.extract_questions(image_path, question_boxes)
+            question_images = self.extract_questions(image_path, question_boxes, i + 1)
             
             # 记录题目信息
             for j, question_path in enumerate(question_images):

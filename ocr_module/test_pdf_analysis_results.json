@@ -1,0 +1,70 @@
+{
+  "total_pages": 4,
+  "pages": [
+    {
+      "page_number": 1,
+      "image_path": "pdf_pages\\page_1.png",
+      "questions": [
+        {
+          "question_number": 1,
+          "image_path": "extracted_questions\\page_1_question_1.png",
+          "bounding_box": [
+            0,
+            0,
+            120,
+            150
+          ]
+        }
+      ]
+    },
+    {
+      "page_number": 2,
+      "image_path": "pdf_pages\\page_2.png",
+      "questions": [
+        {
+          "question_number": 1,
+          "image_path": "extracted_questions\\page_2_question_1.png",
+          "bounding_box": [
+            0,
+            0,
+            120,
+            150
+          ]
+        }
+      ]
+    },
+    {
+      "page_number": 3,
+      "image_path": "pdf_pages\\page_3.png",
+      "questions": [
+        {
+          "question_number": 1,
+          "image_path": "extracted_questions\\page_3_question_1.png",
+          "bounding_box": [
+            0,
+            0,
+            120,
+            150
+          ]
+        }
+      ]
+    },
+    {
+      "page_number": 4,
+      "image_path": "pdf_pages\\page_4.png",
+      "questions": [
+        {
+          "question_number": 1,
+          "image_path": "extracted_questions\\page_4_question_1.png",
+          "bounding_box": [
+            0,
+            0,
+            120,
+            150
+          ]
+        }
+      ]
+    }
+  ],
+  "total_questions": 4
+}
