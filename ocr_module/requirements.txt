@@ -5,16 +5,12 @@ numpy>=1.21.0
 opencv-python>=4.5.0
 Pillow>=8.3.0
 
-# Pix2Text依赖 (数学公式识别)
-# 注意：Pix2Text可能需要从GitHub安装，因为PyPI上的版本可能不是最新的
-# pix2text>=1.0.0
-
 # Paddle OCR依赖 (通用文本识别)
 paddleocr>=2.0.0
 paddlepaddle>=2.0.0
 
 # 日志和工具
-logging>=0.4.9.6
+# logging>=0.4.9.6 (这是Python标准库，不需要安装)
 
 # 如果使用GPU加速，取消注释下面的行
 # paddlepaddle-gpu>=2.0.0
