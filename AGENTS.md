@@ -18,6 +18,11 @@ python -m compileall -q ocr_module
 python -m pytest -q ocr_module/latex_to_image/test_converter.py
 ```
 
+The batch-pipeline suite `ocr_module/test_batch_process.py` is not part of that gate;
+it skips its OpenCV / PyPDF2 / pdf2image cases when those packages are absent. Run it
+directly after touching `batch_process.py`, `question_restorer.py`, `batch_paths.py`,
+or `pdf_analyzer.py`.
+
 Add focused tests for changed behavior. Do not treat scripts that only print results as proof of correctness; use assertions where practical.
 
 ## External resources
