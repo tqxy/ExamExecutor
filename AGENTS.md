@@ -26,3 +26,10 @@ The default gate intentionally does not download OCR models or depend on local P
 ## Generated files
 
 Do not commit generated OCR output, rendered images, virtual environments, caches, or test artifacts unless the issue explicitly requires a fixture. Keep changes scoped to the issue and preserve the existing `master` branch behavior.
+
+## Language policy
+
+- Issue 评论、分诊内容、PR 标题和描述、review 正文均使用简体中文。
+- 代码标识符、命令、文件路径和技术术语保持原文。
+- 不得翻译或修改自动化使用的标签、HTML markers 和 AI disclosure。
+- Review 结尾的机器判定行必须保持为 `✅ APPROVED` 或 `🔄 CHANGES REQUESTED`。
