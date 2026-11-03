@@ -1,0 +1,28 @@
+name: Issue readiness policy
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  authorized-writers:
+    if: github.event.label.name == 'ready-for-dev'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require a repository writer for readiness changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.event.sender.login }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          permission=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" --jq .permission)
+          case "$permission" in
+            write|maintain|admin) ;;
+            *)
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/labels/ready-for-dev"
+              ;;
+          esac
