@@ -5,6 +5,7 @@
 - `ocr_module/src/`: OCR processing implementation.
 - `ocr_module/latex_to_image/`: LaTeX rendering implementation and lightweight tests.
 - `ocr_module/src/test/`: OCR scripts that may require models or local fixtures.
+- `ocr_module/batch_process.py` / `ocr_module/question_restorer.py`: 试卷批量流程与还原模块，运行目录与归档字段定义见 `ocr_module/BATCH_WORKFLOW.md`。
 - `doc/`: Product and architecture documents.
 
 ## Required pull request checks
@@ -16,6 +17,11 @@ python -m pip install -r ocr_module/latex_to_image/requirements.txt
 python -m compileall -q ocr_module
 python -m pytest -q ocr_module/latex_to_image/test_converter.py
 ```
+
+The batch-pipeline suite `ocr_module/test_batch_process.py` is not part of that gate;
+it skips its OpenCV / PyPDF2 / pdf2image cases when those packages are absent. Run it
+directly after touching `batch_process.py`, `question_restorer.py`, `batch_paths.py`,
+or `pdf_analyzer.py`.
 
 Add focused tests for changed behavior. Do not treat scripts that only print results as proof of correctness; use assertions where practical.
 
