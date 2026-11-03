@@ -16,7 +16,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
+  pull-requests: read
   statuses: write
 
 jobs:
@@ -103,16 +103,13 @@ jobs:
             exit 1
           fi
 
-      - name: Publish tests status and ready approved PR
+      - name: Publish tests status
         if: always() && steps.head.outputs.sha != ''
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ steps.head.outputs.sha }}
           JOB_STATUS: ${{ job.status }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_NUMBER: ${{ inputs.pr_number }}
-          EVENT_NAME: ${{ github.event_name }}
         run: |
           if [ "$JOB_STATUS" = "success" ]; then
             state=success
@@ -126,21 +123,12 @@ jobs:
             -f context="software-factory/tests" \
             -f description="$description" \
             -f target_url="$RUN_URL"
-          if [ "$state" != "success" ]; then exit 0; fi
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then pr_number="$PR_NUMBER"; else pr_number="$EVENT_PR_NUMBER"; fi
-          review_state=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/statuses?per_page=100" \
-            --jq '([.[] | select(.context == "software-factory/review")][0].state) // empty')
-          read -r draft merge_state < <(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr_number" \
-            --jq '[.draft, .mergeable_state] | @tsv')
-          if [ "$review_state" = "success" ] && [ "$draft" = "true" ] && [ "$merge_state" != "dirty" ]; then
-            gh pr ready "$pr_number" --repo "$GITHUB_REPOSITORY"
-          fi
 
   review:
     if: github.event_name != 'pull_request' && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.pr_number != '')
     runs-on: ubuntu-latest
     steps:
-      - name: Publish current OpenHands review status and ready approved PR
+      - name: Publish current OpenHands review status
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
@@ -203,16 +191,6 @@ jobs:
               "-f", f"description={description}",
               "-f", f"target_url={review.get('html_url') or os.environ['RUN_URL']}",
           ], check=True, stdout=subprocess.DEVNULL)
-          if state != "success" or not pr.get("draft") or pr.get("mergeable_state") == "dirty":
-              raise SystemExit(0)
-          statuses = json.loads(subprocess.check_output([
-              "gh", "api", f"repos/{repository}/commits/{head_sha}/statuses?per_page=100"
-          ], text=True))
-          latest = {}
-          for status in statuses:
-              latest.setdefault(status.get("context"), status.get("state"))
-          if latest.get("software-factory/tests") == "success":
-              subprocess.run(["gh", "pr", "ready", pr_number, "--repo", repository], check=True)
           PY
 
   conflicts:
