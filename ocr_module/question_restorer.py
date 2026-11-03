@@ -28,7 +28,8 @@ RESTORED_FILE = batch_paths.RESTORED_FILE
 STEP_RESTORE = "restore"
 
 OPTION_PATTERN = re.compile(r"^\s*([A-Za-z])\s*[\.、．)）]\s*(.*)$")
-ANSWER_PATTERN = re.compile(r"(?:【\s*答案\s*】|答案)\s*[:：]?\s*(.{0,40})")
+# 行首锚定，且裸词「答案」必须带分隔符：避免「下列答案为无穷小量的个数」这类题干被误判成答案行
+ANSWER_PATTERN = re.compile(r"^\s*(?:【\s*答案\s*】\s*[:：]?|答案\s*[:：])\s*(\S.*)$")
 
 
 def now_iso() -> str:
@@ -82,6 +83,9 @@ def collect_text_lines(document: Dict[str, Any]) -> List[str]:
 def split_stem_and_options(lines: List[str]) -> Dict[str, Any]:
     """把文本行拆成题干、选项与答案
 
+    三类行的判定相互独立，不依赖出现顺序：答案行不会关掉选项分支，
+    选项也不会因为答案先出现而被拼进题干。出现多行答案时取第一行。
+
     Args:
         lines: 识别文本行
 
@@ -90,24 +94,26 @@ def split_stem_and_options(lines: List[str]) -> Dict[str, Any]:
     """
     stem_lines: List[str] = []
     options: List[Dict[str, str]] = []
-    answer: Optional[str] = None
+    answers: List[str] = []
 
     for line in lines:
-        option_match = OPTION_PATTERN.match(line)
-        answer_match = ANSWER_PATTERN.search(line)
-
+        answer_match = ANSWER_PATTERN.match(line)
         if answer_match:
-            value = answer_match.group(1).strip()
-            answer = value if value else answer
+            answers.append(answer_match.group(1).strip())
             continue
 
-        if option_match and not answer:
+        option_match = OPTION_PATTERN.match(line)
+        if option_match:
             options.append({"label": option_match.group(1).upper(), "text": option_match.group(2).strip()})
             continue
 
         stem_lines.append(line)
 
-    return {"stem": "\n".join(stem_lines), "options": options, "answer": answer}
+    return {
+        "stem": "\n".join(stem_lines),
+        "options": options,
+        "answer": answers[0] if answers else None,
+    }
 
 
 def normalize_document(document: Dict[str, Any], *, ocr_json_path: str = "",
@@ -180,7 +186,7 @@ class QuestionRestorer:
             question_number: 归档索引里的题号，用于补齐 JSON 缺失字段
 
         Returns:
-            dict 或 None：内容为空的题目返回 None
+            dict 或 None：无法读取、缺少必要字段或内容为空的题目返回 None
         """
         resolved = batch_paths.resolve_archive_path(ocr_json_path, self.roots)
 
@@ -197,9 +203,10 @@ class QuestionRestorer:
         missing = [key for key in ("ocr", "source") if not isinstance(document.get(key), dict)]
         if missing:
             self.record_error(
-                "OCR JSON 缺少必要字段: {fields}".format(fields=", ".join(missing)),
+                "OCR JSON 缺少必要字段: {fields}，已跳过".format(fields=", ".join(missing)),
                 ocr_json_path, source_pdf_path,
             )
+            return None
 
         archive_path = batch_paths.to_archive_path(resolved, self.roots)
         record = normalize_document(document, ocr_json_path=archive_path, source_pdf_path=source_pdf_path)

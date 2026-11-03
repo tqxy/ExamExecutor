@@ -228,11 +228,14 @@ def build_ocr_document(
     }
 
 
-def rasterize_pages(pdf_path: str, output_dir: str, dpi: int) -> Tuple[int, List[Tuple[int, str]]]:
+def rasterize_pages(
+    pdf_path: str, output_dir: str, dpi: int
+) -> Tuple[int, List[Tuple[int, str]], List[Tuple[int, str]]]:
     """第 1 步：PDF 转图片，逐页写出 page_{N}.png
 
     先用 PyPDF2 取页数，再逐页调用 pdf2image，这样页码与文件名的对应关系
-    不受 pdf2image 临时文件命名规则的影响。
+    不受 pdf2image 临时文件命名规则的影响。单页渲染失败只进 failed_pages，
+    其余页面继续渲染，由调用方逐页登记错误。
 
     Args:
         pdf_path: PDF 路径
@@ -240,7 +243,7 @@ def rasterize_pages(pdf_path: str, output_dir: str, dpi: int) -> Tuple[int, List
         dpi: 转图分辨率
 
     Returns:
-        tuple: (总页数, [(页码, 图片路径), ...])
+        tuple: (总页数, [(页码, 图片路径), ...], [(页码, 错误信息), ...])
     """
     import PyPDF2
     from pdf2image import convert_from_path
@@ -250,15 +253,26 @@ def rasterize_pages(pdf_path: str, output_dir: str, dpi: int) -> Tuple[int, List
 
     os.makedirs(output_dir, exist_ok=True)
     page_images: List[Tuple[int, str]] = []
+    failed_pages: List[Tuple[int, str]] = []
     for number in range(1, total_pages + 1):
-        images = convert_from_path(pdf_path, dpi=dpi, first_page=number, last_page=number)
-        if not images:
-            raise RuntimeError("第 {number} 页没有生成图像".format(number=number))
         target = os.path.join(output_dir, "page_{number}.png".format(number=number))
-        images[0].save(target, "PNG")
+        try:
+            images = convert_from_path(pdf_path, dpi=dpi, first_page=number, last_page=number)
+            if not images:
+                raise RuntimeError("第 {number} 页没有生成图像".format(number=number))
+            images[0].save(target, "PNG")
+        except Exception as error:
+            # 写入中途失败可能留下半张图片，删掉它，避免归档索引与磁盘产物不一致
+            if os.path.exists(target):
+                try:
+                    os.remove(target)
+                except OSError:
+                    pass
+            failed_pages.append((number, "{type}: {error}".format(type=type(error).__name__, error=error)))
+            continue
         page_images.append((number, target))
 
-    return total_pages, page_images
+    return total_pages, page_images, failed_pages
 
 
 class ExamBatchPipeline:
@@ -347,10 +361,9 @@ class ExamBatchPipeline:
         """重复运行时删除上一轮产物，保证同名文件被覆盖且不残留多余文件
 
         只清理本流程管理的目录与文件名，避免误删用户放进同一目录的其他内容。
+        不以 manifest.json 是否存在为前提：上一轮若在写索引之前崩溃，残留产物
+        同样需要清掉，否则失败页的图片会一直留在目录里却不在任何索引中。
         """
-        if not os.path.exists(os.path.join(self.run_dir, MANIFEST_FILE)):
-            return
-
         plans = (
             (self.pages_dir, re.compile(r"^(doc\d+_)?page_\d+\.png$")),
             (self.questions_dir, re.compile(r"^(doc\d+_)?page_\d+_question_\d+\.png$")),
@@ -391,12 +404,19 @@ class ExamBatchPipeline:
             return summary
 
         try:
-            total_pages, page_images = rasterize_pages(pdf_path, self.pages_dir, self.dpi)
+            total_pages, page_images, failed_pages = rasterize_pages(pdf_path, self.pages_dir, self.dpi)
         except Exception as error:
+            # 整份试卷级别的失败（打不开、读不到页数），此时没有任何页面可继续
             self.record_error(STEP_PDF_TO_IMAGE, "PDF 转图片失败: {error}".format(error=error), pdf=pdf_path)
             return summary
 
         summary["total_pages"] = total_pages
+        for page_number, message in failed_pages:
+            self.record_error(STEP_PDF_TO_IMAGE,
+                              "第 {page} 页转图片失败: {message}".format(page=page_number, message=message),
+                              pdf=pdf_path, page=page_number)
+        if not page_images:
+            return summary
         # 边界检测与裁剪依赖 OpenCV，按需导入，让本模块可以在轻量门禁下被引用
         from pdf_analyzer import PDFAnalyzer
 

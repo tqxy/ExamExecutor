@@ -332,7 +332,7 @@ def check_dependencies() -> Optional[str]
 ##### rasterize_pages
 
 ```python
-def rasterize_pages(pdf_path: str, output_dir: str, dpi: int) -> Tuple[int, List[Tuple[int, str]]]
+def rasterize_pages(pdf_path: str, output_dir: str, dpi: int) -> Tuple[int, List[Tuple[int, str]], List[Tuple[int, str]]]
 ```
 
 参数：
@@ -341,7 +341,8 @@ def rasterize_pages(pdf_path: str, output_dir: str, dpi: int) -> Tuple[int, List
 - dpi (int): 转图分辨率
 
 返回值：
-- tuple: (总页数, [(页码, page_{N}.png 路径), ...])
+- tuple: (总页数, [(页码, page_{N}.png 路径), ...], [(页码, 错误信息), ...])
+- 单页渲染失败只进第三个返回值并删除该页可能写坏的半成品，不抛异常；页数读不出来等整份试卷级失败才抛异常
 
 ##### QuestionOCREngine
 
@@ -408,7 +409,7 @@ def record_error(self, message: str, ocr_json_path: str = '', source_pdf_path: s
 - documents (list): manifest 中的 documents 列表
 
 返回值：
-- dict 或 None: restore_file 返回单条结构化题目记录，内容为空时返回 None 并记录错误
+- dict 或 None: restore_file 返回单条结构化题目记录；无法读取、缺少 `ocr`/`source` 必要字段、内容为空时返回 None 并记录一条错误，不写入 questions
 - dict: restore_documents / summary 返回还原结果汇总，含 questions 与逐条 errors
 
 缺字段、内容为空、JSON 无法解析都只记录该条错误并继续，不抛未捕获异常。
@@ -423,7 +424,7 @@ def collect_documents(run_dir: str) -> List[Dict[str, Any]]
 ```
 
 - collect_text_lines: 取引擎返回的文本行，优先逐行 texts，退回 combined_text / text
-- split_stem_and_options: 返回 {'stem': str, 'options': list, 'answer': str | None}
+- split_stem_and_options: 返回 {'stem': str, 'options': list, 'answer': str | None}；答案行、选项行、题干行各自独立判定，与出现顺序无关；答案行需行首锚定且带分隔符（`【答案】 X` 或 `答案：X`），题干里的「答案」二字不触发；多行答案取第一行
 - normalize_document: 归档 JSON 转结构化题目记录（题干、选项、答案、来源页、bounding_box、置信度）
 - collect_documents: 优先读 manifest.json，没有则按 ocr_json/ 目录扫描
 - main: 命令行入口。退出码 0 全部成功，1 存在还原错误（stderr 列出），2 运行目录没有可读归档

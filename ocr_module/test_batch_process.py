@@ -118,7 +118,7 @@ def stubbed_pipeline(monkeypatch, pdf):
             target = os.path.join(output_dir, "page_{number}.png".format(number=number))
             make_page_image(target)
             pages.append((number, target))
-        return 2, pages
+        return 2, pages, []
 
     monkeypatch.setattr(batch_process, "rasterize_pages", fake_rasterize)
     monkeypatch.setattr(
@@ -304,8 +304,9 @@ def test_rasterize_pages_writes_one_file_per_page(monkeypatch, tmp_path):
 
     monkeypatch.setattr(pdf2image, "convert_from_path", fake_convert)
     output_dir = str(tmp_path / "pages")
-    total, images = batch_process.rasterize_pages(pdf_path, output_dir, 150)
+    total, images, failed = batch_process.rasterize_pages(pdf_path, output_dir, 150)
 
+    assert failed == []
     assert total == 2
     assert [name for _num, name in images] == [
         os.path.join(output_dir, "page_1.png"),
@@ -316,16 +317,47 @@ def test_rasterize_pages_writes_one_file_per_page(monkeypatch, tmp_path):
         assert os.path.isfile(name)
 
 
-def test_rasterize_pages_raises_on_empty_page(monkeypatch, tmp_path):
-    """某页转图失败时抛异常，由调用方逐条记录而不是中断整批"""
+def test_rasterize_pages_reports_failed_pages_without_raising(monkeypatch, tmp_path):
+    """某页转图失败时返回失败页码，不抛异常，其余页面照常产出"""
     pdf2image = pytest.importorskip("pdf2image", reason="第 1 步需要 pdf2image")
     pytest.importorskip("PyPDF2", reason="第 1 步需要 PyPDF2")
+    from PIL import Image
 
     pdf_path = str(tmp_path / "real.pdf")
-    write_real_pdf(pdf_path, page_count=1)
+    write_real_pdf(pdf_path, page_count=2)
+    pages_dir = str(tmp_path / "pages")
+
     monkeypatch.setattr(pdf2image, "convert_from_path", lambda *args, **kwargs: [])
-    with pytest.raises(RuntimeError):
-        batch_process.rasterize_pages(pdf_path, str(tmp_path / "pages"), 100)
+    total, images, failed = batch_process.rasterize_pages(pdf_path, pages_dir, 100)
+    assert total == 2
+    assert images == []
+    assert [number for number, _msg in failed] == [1, 2]
+    assert "没有生成图像" in failed[0][1]
+
+    # 只有第 1 页能渲染：失败的页面不抛异常，成功的页面继续返回
+    def only_first_page(path, dpi=200, first_page=None, last_page=None, **kwargs):
+        if first_page == 1:
+            return [Image.new("RGB", (60, 40), color="white")]
+        return []
+
+    monkeypatch.setattr(pdf2image, "convert_from_path", only_first_page)
+    total, images, failed = batch_process.rasterize_pages(pdf_path, pages_dir, 100)
+    assert total == 2
+    assert [number for number, _name in images] == [1]
+    assert [number for number, _msg in failed] == [2]
+
+    # 渲染中途抛异常时不留半张图片，避免索引与磁盘产物不一致
+    def half_written(path, dpi=200, first_page=None, last_page=None, **kwargs):
+        if first_page == 1:
+            Image.new("RGB", (10, 10), color="white").save(
+                os.path.join(pages_dir, "page_1.png"), "PNG")
+        raise RuntimeError("模拟渲染中断")
+
+    monkeypatch.setattr(pdf2image, "convert_from_path", half_written)
+    total, images, failed = batch_process.rasterize_pages(pdf_path, pages_dir, 100)
+    assert images == []
+    assert not os.path.exists(os.path.join(pages_dir, "page_1.png"))
+    assert [number for number, _msg in failed] == [1, 2]
 
 
 def test_unreadable_pdf_records_error_without_crash(tmp_path, run_dir):
@@ -413,7 +445,7 @@ def test_source_pdf_path_is_repo_relative_when_inside_repo(monkeypatch, tmp_path
         os.makedirs(output_dir, exist_ok=True)
         made = os.path.join(output_dir, "page_1.png")
         make_page_image(made)
-        return 1, [(1, made)]
+        return 1, [(1, made)], []
 
     monkeypatch.setattr(batch_process, "rasterize_pages", fake_rasterize)
     monkeypatch.setattr(PDFAnalyzer, "detect_question_boundaries",
@@ -448,7 +480,7 @@ def test_rerun_produces_same_files_without_stale_leftovers(monkeypatch, pdf, run
                 target = os.path.join(output_dir, "page_{number}.png".format(number=number))
                 make_page_image(target)
                 pages.append((number, target))
-            return page_count, pages
+            return page_count, pages, []
 
         return fake_rasterize
 
@@ -475,6 +507,18 @@ def test_rerun_same_input_keeps_identical_file_names(stubbed_pipeline, run_dir):
     first = list_files(run_dir)
     batch_process.ExamBatchPipeline([stubbed_pipeline], run_dir, engine=StubEngine()).run()
     assert list_files(run_dir) == first
+
+
+def test_prune_without_manifest_clears_previous_output(run_dir):
+    """上一轮崩溃没写 manifest 时，残留产物同样要清掉"""
+    os.makedirs(os.path.join(run_dir, batch_process.PAGE_IMAGES_DIR), exist_ok=True)
+    leftover = os.path.join(run_dir, batch_process.PAGE_IMAGES_DIR, "page_1.png")
+    with open(leftover, "w", encoding="utf-8") as handle:
+        handle.write("stale")
+    assert not os.path.exists(os.path.join(run_dir, batch_process.MANIFEST_FILE))
+
+    batch_process.ExamBatchPipeline(["x.pdf"], run_dir, engine=StubEngine()).prepare()
+    assert not os.path.exists(leftover)
 
 
 def test_prune_only_touches_pipeline_outputs(run_dir):
@@ -510,7 +554,7 @@ def test_multiple_documents_get_distinct_prefixes(monkeypatch, tmp_path, run_dir
         os.makedirs(output_dir, exist_ok=True)
         target = os.path.join(output_dir, "page_1.png")
         make_page_image(target)
-        return 1, [(1, target)]
+        return 1, [(1, target)], []
 
     monkeypatch.setattr(batch_process, "rasterize_pages", fake_rasterize)
     monkeypatch.setattr(PDFAnalyzer, "detect_question_boundaries",
@@ -531,6 +575,102 @@ def test_multiple_documents_get_distinct_prefixes(monkeypatch, tmp_path, run_dir
 # ---------------------------------------------------------------------------
 
 
+def test_one_page_failure_keeps_other_pages_archived(monkeypatch, pdf, run_dir):
+    """第 1 步单页失败：失败页逐条记录，其余页面照常走第 2-4 步并进入索引"""
+    PDFAnalyzer = load_analyzer()
+
+    def fake_rasterize(pdf_path, output_dir, dpi):
+        os.makedirs(output_dir, exist_ok=True)
+        images = []
+        failed = []
+        for number in (1, 2, 3):
+            if number == 2:
+                # 模拟第 2 页渲染失败，且不留半张图片
+                failed.append((number, "RuntimeError: 第 2 页没有生成图像"))
+                continue
+            target = os.path.join(output_dir, "page_{number}.png".format(number=number))
+            make_page_image(target)
+            images.append((number, target))
+        return 3, images, failed
+
+    monkeypatch.setattr(batch_process, "rasterize_pages", fake_rasterize)
+    monkeypatch.setattr(PDFAnalyzer, "detect_question_boundaries",
+                        lambda self, image_path: [(60, 100, 460, 200)])
+
+    pipeline = batch_process.ExamBatchPipeline([pdf], run_dir, engine=StubEngine())
+    manifest = pipeline.run()
+
+    # manifest 顶层的 total_pages 是成功转图的页数，documents[].total_pages 才是 PDF 页数
+    assert manifest["total_pages"] == 2
+    assert manifest["documents"][0]["total_pages"] == 3
+    assert manifest["documents"][0]["converted_pages"] == 2
+    assert manifest["total_questions"] == 2
+    assert [page["page_number"] for page in manifest["documents"][0]["pages"]] == [1, 3]
+
+    # 失败的页面单独记一条错误，页码可定位
+    assert len(pipeline.errors) == 1
+    assert pipeline.errors[0]["step"] == "pdf_to_image"
+    assert pipeline.errors[0]["page"] == 2
+    assert manifest["success"] is False
+
+    # 归档索引与磁盘产物一致：成功的两张页面图片都在，失败的第 2 页没有落盘
+    files = list_files(run_dir)
+    assert "page_images/page_1.png" in files
+    assert "page_images/page_3.png" in files
+    assert "page_images/page_2.png" not in files
+    assert "ocr_json/page_1_question_1.json" in files
+    assert "ocr_json/page_3_question_1.json" in files
+    assert "ocr_json/page_2_question_1.json" not in files
+
+
+def test_multiple_page_failures_record_one_error_per_page(monkeypatch, pdf, run_dir):
+    """多页失败时逐页记录，页数与错误数一一对应"""
+    PDFAnalyzer = load_analyzer()
+
+    def fake_rasterize(pdf_path, output_dir, dpi):
+        os.makedirs(output_dir, exist_ok=True)
+        images, failed = [], []
+        for number in (1, 2, 3, 4):
+            if number % 2 == 0:
+                failed.append((number, "RuntimeError: 第 {n} 页没有生成图像".format(n=number)))
+                continue
+            target = os.path.join(output_dir, "page_{number}.png".format(number=number))
+            make_page_image(target)
+            images.append((number, target))
+        return 4, images, failed
+
+    monkeypatch.setattr(batch_process, "rasterize_pages", fake_rasterize)
+    monkeypatch.setattr(PDFAnalyzer, "detect_question_boundaries",
+                        lambda self, image_path: [(60, 100, 460, 200)])
+
+    pipeline = batch_process.ExamBatchPipeline([pdf], run_dir, engine=StubEngine())
+    manifest = pipeline.run()
+
+    assert sorted(error["page"] for error in pipeline.errors) == [2, 4]
+    assert manifest["total_pages"] == 2
+    assert manifest["documents"][0]["total_pages"] == 4
+    assert manifest["documents"][0]["converted_pages"] == 2
+    assert manifest["total_errors"] == 2
+
+
+def test_all_pages_failed_yields_no_pages_and_records_errors(monkeypatch, pdf, run_dir):
+    """整份试卷每页都失败时不产出页面索引，但页数与错误仍然如实归档"""
+    def fake_rasterize(pdf_path, output_dir, dpi):
+        os.makedirs(output_dir, exist_ok=True)
+        return 2, [], [(1, "RuntimeError: 第 1 页没有生成图像"), (2, "RuntimeError: 第 2 页没有生成图像")]
+
+    monkeypatch.setattr(batch_process, "rasterize_pages", fake_rasterize)
+    pipeline = batch_process.ExamBatchPipeline([pdf], run_dir, engine=StubEngine())
+    manifest = pipeline.run()
+
+    assert manifest["total_pages"] == 0
+    assert manifest["documents"][0]["total_pages"] == 2
+    assert manifest["documents"][0]["converted_pages"] == 0
+    assert manifest["documents"][0]["pages"] == []
+    assert len(pipeline.errors) == 2
+    assert not list_files(run_dir) - {"manifest.json", "errors.json"}
+
+
 def test_failures_are_recorded_per_item_and_others_continue(monkeypatch, pdf, run_dir):
     """某页未检测到题目、某题识别报错都逐条记录，其余题目继续"""
     PDFAnalyzer = load_analyzer()
@@ -542,7 +682,7 @@ def test_failures_are_recorded_per_item_and_others_continue(monkeypatch, pdf, ru
             target = os.path.join(output_dir, "page_{number}.png".format(number=number))
             make_page_image(target)
             pages.append((number, target))
-        return 3, pages
+        return 3, pages, []
 
     def detect(self, image_path):
         if image_path.endswith("page_2.png"):
@@ -590,7 +730,7 @@ def test_pdf_conversion_failure_keeps_other_documents(monkeypatch, tmp_path, run
         os.makedirs(output_dir, exist_ok=True)
         target = os.path.join(output_dir, "page_1.png")
         make_page_image(target)
-        return 1, [(1, target)]
+        return 1, [(1, target)], []
 
     monkeypatch.setattr(batch_process, "rasterize_pages", fake_rasterize)
     monkeypatch.setattr(PDFAnalyzer, "detect_question_boundaries",
@@ -646,6 +786,82 @@ def test_restorer_falls_back_to_combined_text():
     assert record["answer"] is None
 
 
+def test_split_stem_and_options_is_order_independent():
+    """答案行、选项行、题干行各自独立判定，不依赖出现顺序"""
+    parts = question_restorer.split_stem_and_options(
+        ["答案：B", "A. 0", "B. 1", "设函数 f(x) 连续"])
+    assert parts["answer"] == "B"
+    assert [option["label"] for option in parts["options"]] == ["A", "B"]
+    assert parts["stem"] == "设函数 f(x) 连续"
+
+    # 题干里出现「答案」二字不算答案行
+    parts = question_restorer.split_stem_and_options(["下列答案为无穷小量的个数", "A. 0", "B. 1"])
+    assert parts["answer"] is None
+    assert parts["stem"] == "下列答案为无穷小量的个数"
+    assert [option["label"] for option in parts["options"]] == ["A", "B"]
+
+    # 多行答案取第一行
+    parts = question_restorer.split_stem_and_options(["答案：C", "答案：D"])
+    assert parts["answer"] == "C"
+
+
+def test_restorer_keeps_stem_containing_answer_word():
+    """题干含「答案」二字的真题：stem、四个选项、答案行都要拆对"""
+    lines = ["设 x→0 时下列答案为无穷小量的个数", "A. 0", "B. 1", "C. 2", "D. 3", "【答案】 C"]
+    document = {
+        "engine": "combined",
+        "confidence": 0.9,
+        "ocr": {"paddleocr_result": {"text_recognition": {"texts": lines}}},
+        "source": {"page_number": 1, "question_number": 1},
+    }
+
+    record = question_restorer.normalize_document(document, ocr_json_path="ocr_json/page_1_question_1.json")
+    assert record["stem"] == "设 x→0 时下列答案为无穷小量的个数"
+    assert [option["label"] for option in record["options"]] == ["A", "B", "C", "D"]
+    assert [option["text"] for option in record["options"]] == ["0", "1", "2", "3"]
+    assert record["answer"] == "C"
+
+    # 「答案见解析」这类没有分隔符的写法属于题干，不再被当成答案行
+    document["ocr"]["paddleocr_result"]["text_recognition"]["texts"] = [
+        "求极限，答案见解析", "A. 1", "B. 2"]
+    record = question_restorer.normalize_document(document, ocr_json_path="ocr_json/page_1_question_2.json")
+    assert record["stem"] == "求极限，答案见解析"
+    assert [option["label"] for option in record["options"]] == ["A", "B"]
+    assert record["answer"] is None
+
+
+def test_restorer_answer_formats():
+    """带分隔符的答案行各种写法都能识别"""
+    for line, expected in (("答案：B", "B"), ("答案: B", "B"), ("答案 B", None),
+                           ("【答案】 B", "B"), ("【答案】B", "B"), ("答案为 B", None),
+                           ("  答案：  B  ", "B")):
+        parts = question_restorer.split_stem_and_options([line])
+        assert parts["answer"] == expected, line
+        assert parts["stem"] == ("" if expected else line), line
+
+    # 只有「答案」标签没有内容时不算答案，整行留在题干里，answer 不会是空串
+    for line in ("答案：", "答案：   ", "【答案】"):
+        parts = question_restorer.split_stem_and_options([line])
+        assert parts["answer"] is None, line
+        assert parts["stem"] == line, line
+
+
+def test_restorer_skips_document_without_required_fields(tmp_path):
+    """缺少 ocr / source 的记录只记一条错误并跳过，不写入 questions"""
+    ocr_dir = tmp_path / "ocr_json"
+    ocr_dir.mkdir()
+    path = ocr_dir / "page_1_question_1.json"
+    path.write_text(json.dumps({"engine": "combined", "ocr": {"combined_text": "题干文字"}}),
+                    encoding="utf-8")
+
+    restorer = question_restorer.QuestionRestorer(roots=(str(tmp_path),))
+    assert restorer.restore_file("ocr_json/page_1_question_1.json") is None
+    result = restorer.summary()
+    assert result["total_questions"] == 0
+    assert result["total_errors"] == 1
+    assert "缺少必要字段: source" in result["errors"][0]["message"]
+
+
 def test_restorer_builds_structured_records(stubbed_pipeline, run_dir):
     """第 5 步读取第 4 步归档的 JSON，产出结构化题目记录"""
     batch_process.ExamBatchPipeline([stubbed_pipeline], run_dir, engine=StubEngine()).run()
@@ -672,7 +888,7 @@ def test_restorer_builds_structured_records(stubbed_pipeline, run_dir):
 
 
 def test_restorer_records_errors_and_continues(tmp_path):
-    """缺字段、内容为空、JSON 无法解析都记录错误并继续，不抛未捕获异常"""
+    """缺字段、内容为空、JSON 无法解析都记录错误并跳过该条，不抛未捕获异常"""
     ocr_dir = tmp_path / "ocr_json"
     ocr_dir.mkdir()
     roots = (str(tmp_path),)
@@ -704,11 +920,13 @@ def test_restorer_records_errors_and_continues(tmp_path):
     assert result["total_questions"] == 1
     assert result["questions"][0]["stem"] == "求极限"
     assert result["questions"][0]["answer"] == "1"
+    assert result["questions"][0]["question_id"] == "page_3_question_1"
     messages = " ".join(error["message"] for error in result["errors"])
     assert "无法读取或解析" in messages
-    assert "缺少必要字段" in messages
+    assert "缺少必要字段: ocr, source，已跳过" in messages
     assert "内容为空" in messages
-    assert len(result["errors"]) == 6
+    # 缺必要字段的那条只记一次错误并跳过，不再写入 questions
+    assert len(result["errors"]) == 5
 
 
 def test_restorer_flags_questions_without_archive_json(tmp_path):
@@ -768,7 +986,7 @@ def test_restorer_missing_run_dir(tmp_path, capsys):
 
 
 def test_batch_cli_exit_code_reports_failures(monkeypatch, pdf, run_dir, capsys):
-    """流程结束时以非零退出码返回并指出失败项"""
+    """整份试卷读不到页数时以非零退出码返回并指出失败项"""
 
     def raise_conversion_error(*args, **kwargs):
         raise RuntimeError("模拟 poppler 失败")
@@ -814,7 +1032,7 @@ def test_batch_cli_clear_removes_previous_output(monkeypatch, pdf, run_dir):
         os.makedirs(output_dir, exist_ok=True)
         target = os.path.join(output_dir, "page_1.png")
         make_page_image(target)
-        return 1, [(1, target)]
+        return 1, [(1, target)], []
 
     monkeypatch.setattr(batch_process, "rasterize_pages", fake_rasterize)
     monkeypatch.setattr(PDFAnalyzer, "detect_question_boundaries",
