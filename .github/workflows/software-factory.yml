@@ -1,0 +1,242 @@
+name: Software Factory gates
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request to backfill; leave empty to scan for conflicts
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+jobs:
+  tests:
+    if: github.event_name != 'pull_request_review' && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.pr_number != '')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve pull request head
+        id: head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            sha=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)
+          else
+            sha="$EVENT_HEAD_SHA"
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.head.outputs.sha }}
+
+      - uses: actions/setup-python@v5
+        if: hashFiles('pyproject.toml', 'setup.py', 'requirements.txt') != ''
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        if: hashFiles('package.json') != ''
+
+      - uses: actions/setup-go@v5
+        if: hashFiles('go.mod') != ''
+
+      - uses: actions/setup-java@v4
+        if: hashFiles('pom.xml', 'build.gradle', 'build.gradle.kts', 'gradlew') != ''
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up project
+        env:
+          FACTORY_SETUP_COMMAND: ${{ vars.FACTORY_SETUP_COMMAND }}
+        run: |
+          if [ -n "$FACTORY_SETUP_COMMAND" ]; then
+            bash -lc "$FACTORY_SETUP_COMMAND"
+          elif [ -f pyproject.toml ] || [ -f setup.py ]; then
+            python -m pip install -e .
+            python -m pip install pytest
+          elif [ -f requirements.txt ]; then
+            python -m pip install -r requirements.txt
+            python -m pip install pytest
+          elif [ -f package.json ]; then
+            if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          elif [ -f gradlew ]; then
+            chmod +x gradlew
+          fi
+
+      - name: Run repository tests
+        env:
+          FACTORY_TEST_COMMAND: ${{ vars.FACTORY_TEST_COMMAND }}
+        run: |
+          if [ -n "$FACTORY_TEST_COMMAND" ]; then
+            bash -lc "$FACTORY_TEST_COMMAND"
+          elif [ -f pyproject.toml ] || [ -f setup.py ] || [ -f requirements.txt ]; then
+            pytest
+          elif [ -f package.json ]; then
+            npm test
+          elif [ -f go.mod ]; then
+            go test ./...
+          elif [ -f Cargo.toml ]; then
+            cargo test
+          elif [ -f pom.xml ]; then
+            mvn -B test
+          elif [ -f gradlew ]; then
+            ./gradlew test
+          elif [ -f Makefile ] && grep -Eq '^test[[:space:]]*:' Makefile; then
+            make test
+          else
+            echo "No supported test command found; set FACTORY_TEST_COMMAND"
+            exit 1
+          fi
+
+      - name: Publish tests status
+        if: always() && steps.head.outputs.sha != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.head.outputs.sha }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$JOB_STATUS" = "success" ]; then
+            state=success
+            description="Repository tests passed"
+          else
+            state=failure
+            description="Repository tests failed or did not complete"
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state="$state" \
+            -f context="software-factory/tests" \
+            -f description="$description" \
+            -f target_url="$RUN_URL"
+
+  review:
+    if: github.event_name != 'pull_request' && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.pr_number != '')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish current OpenHands review status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then pr_number="$PR_NUMBER"; else pr_number="$EVENT_PR_NUMBER"; fi
+          export PR_NUMBER="$pr_number"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > pr.json
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews?per_page=100" > review-pages.json
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          pr_number = os.environ["PR_NUMBER"]
+          with open("pr.json", encoding="utf-8") as handle:
+              pr = json.load(handle)
+          with open("review-pages.json", encoding="utf-8") as handle:
+              pages = json.load(handle)
+          reviews = [review for page in pages for review in page]
+          head_sha = pr["head"]["sha"]
+          markers = (
+              "This review was posted by an AI agent (OpenHands)",
+              "This review was generated by an AI agent (OpenHands)",
+          )
+          candidates = [
+              review for review in reviews
+              if review.get("commit_id") == head_sha
+              and any(marker in (review.get("body") or "") for marker in markers)
+          ]
+          if not candidates:
+              print("No OpenHands review for the current head")
+              raise SystemExit(0)
+
+          review = candidates[-1]
+          body = review.get("body") or ""
+          review_state = (review.get("state") or "").upper()
+          if review_state == "DISMISSED":
+              state = "error"
+              description = "OpenHands review was dismissed"
+          elif review_state == "APPROVED" or re.search(r"^✅ APPROVED\s*$", body, re.MULTILINE):
+              state = "success"
+              description = "OpenHands approved the current head"
+          elif review_state == "CHANGES_REQUESTED" or re.search(r"^🔄 CHANGES REQUESTED\s*$", body, re.MULTILINE):
+              state = "failure"
+              description = "OpenHands requested changes"
+          else:
+              print("Latest OpenHands review has no recognized verdict")
+              raise SystemExit(0)
+
+          subprocess.run([
+              "gh", "api", "--method", "POST",
+              f"repos/{repository}/statuses/{head_sha}",
+              "-f", f"state={state}",
+              "-f", "context=software-factory/review",
+              "-f", f"description={description}",
+              "-f", f"target_url={review.get('html_url') or os.environ['RUN_URL']}",
+          ], check=True, stdout=subprocess.DEVNULL)
+          PY
+
+  conflicts:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.pr_number == '')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Return conflicting accepted PRs to developer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BRANCH_PREFIX: ${{ vars.FACTORY_BRANCH_PREFIX || 'openhands/issue' }}
+        run: |
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" > pr-pages.json
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          prefix = os.environ["BRANCH_PREFIX"]
+          with open("pr-pages.json", encoding="utf-8") as handle:
+              pages = json.load(handle)
+          for item in [pr for page in pages for pr in page]:
+              if not item["head"]["ref"].startswith(prefix + "-"):
+                  continue
+              pr = json.loads(subprocess.check_output([
+                  "gh", "api", f"repos/{repository}/pulls/{item['number']}"
+              ], text=True))
+              if pr.get("mergeable_state") != "dirty":
+                  continue
+              sha = pr["head"]["sha"]
+              statuses = json.loads(subprocess.check_output([
+                  "gh", "api", f"repos/{repository}/commits/{sha}/statuses?per_page=100"
+              ], text=True))
+              latest = {}
+              for status in statuses:
+                  latest.setdefault(status.get("context"), status.get("state"))
+              if latest.get("software-factory/review") != "success":
+                  continue
+              subprocess.run([
+                  "gh", "api", "--method", "POST",
+                  f"repos/{repository}/statuses/{sha}",
+                  "-f", "state=failure",
+                  "-f", "context=software-factory/review",
+                  "-f", "description=Base branch conflict; developer rebase requested",
+                  "-f", f"target_url={os.environ['RUN_URL']}",
+              ], check=True, stdout=subprocess.DEVNULL)
+              print(f"Requested developer rebase for PR #{pr['number']} at {sha}")
+          PY
