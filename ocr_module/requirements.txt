@@ -5,6 +5,11 @@ numpy>=1.21.0
 opencv-python>=4.5.0
 Pillow>=8.3.0
 
+# 批量流程依赖（batch_process.py 第 1 步 PDF 转图片）
+# pdf2image 只是 poppler 命令行的包装，还需要系统侧安装 poppler-utils（pdftoppm/pdfinfo）
+pdf2image>=1.16.0
+PyPDF2>=3.0.0
+
 # Paddle OCR依赖 (通用文本识别)
 paddleocr>=2.0.0
 paddlepaddle>=2.0.0

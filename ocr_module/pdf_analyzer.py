@@ -341,7 +341,7 @@ class PDFAnalyzer:
         
         return unique_boxes
     
-    def extract_questions(self, image_path, question_boxes, page_number=1):
+    def extract_questions(self, image_path, question_boxes, page_number=1, output_dir=None):
         """
         从图像中提取题目
         
@@ -349,6 +349,7 @@ class PDFAnalyzer:
             image_path (str): 图像文件路径
             question_boxes (list): 题目边界框列表
             page_number (int): 页码
+            output_dir (str): 题目图片输出目录，默认当前目录下 extracted_questions
             
         Returns:
             list: 题目图像路径列表
@@ -362,7 +363,7 @@ class PDFAnalyzer:
             return []
         
         # 创建题目输出目录
-        questions_dir = "extracted_questions"
+        questions_dir = output_dir if output_dir else "extracted_questions"
         os.makedirs(questions_dir, exist_ok=True)
         
         question_images = []

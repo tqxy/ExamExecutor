@@ -23,6 +23,15 @@
 pip install -r requirements.txt
 ```
 
+批量流程还需要系统侧的 poppler-utils（`pdf2image` 是其命令行包装）：
+
+```bash
+# Debian/Ubuntu
+apt-get install poppler-utils
+# macOS
+brew install poppler
+```
+
 注意：Pix2Text可能需要从GitHub源码安装最新版本。
 
 ## 使用方法
@@ -71,6 +80,44 @@ filtered_results = ocr.process_with_filtering(
 )
 ```
 
+## 批量流程（issue #5 第 1-5 步）
+
+从试卷 PDF 到结构化题目记录的批量流水线，详细字段定义与验收口径见 `BATCH_WORKFLOW.md`。
+
+```bash
+# 系统侧依赖：poppler-utils（提供 pdftoppm / pdfinfo）
+python -m pip install -r requirements.txt
+
+# 第 1-4 步：PDF 转图片 -> 分割题目边界 -> 逐题裁剪归档 -> 逐题识别归档 JSON
+python batch_process.py "target/2023年考研数学（一）真题.pdf" -o /tmp/exam_run
+
+# 第 5 步：把逐题 OCR JSON 归一化为结构化题目记录
+python question_restorer.py /tmp/exam_run
+```
+
+运行目录结构（产物不提交进仓库，可整体删除完成清理）：
+
+```text
+/tmp/exam_run/
+├── manifest.json              本次运行的归档索引
+├── errors.json                逐条错误汇总
+├── restored_questions.json    结构化题目记录
+├── page_images/               page_{N}.png
+├── question_images/           page_{N}_question_{M}.png
+└── ocr_json/                  page_{N}_question_{M}.json
+```
+
+注意事项：
+
+1. 输入 PDF 路径由操作者在运行时提供，多份试卷一次传入，产物文件名自动加 `doc{序号}_` 前缀。
+2. 单个环节失败（某页无法转图、某页未检测到题目、某张识别报错）逐条写入 `errors.json`，其余页面与题目继续处理；
+   流程结束时以非零退出码返回并在 stderr 列出失败项。
+3. **当前 master 上的 Pix2Text / Paddle OCR 处理器返回占位值**（`_initialize_model` 只写日志，
+   `recognize_*` 返回硬编码内容）。归档 JSON 原样保存引擎返回、`confidence` 与 `engine`，
+   并带 `placeholder_output: true`，不代表真实识别结果。接入真实模型属于 issue #2，
+   本流程只验收流水线与归档结构，不断言识别文本正确性。
+4. 通用 API 化不在本流程范围内，按 issue 约定另立 issue。
+
 ## 处理模式
 
 1. **pix2text_only**：仅使用Pix2Text处理
@@ -93,6 +140,9 @@ filtered_results = ocr.process_with_filtering(
 
 ## 性能指标
 
+> 以下是 `doc/题库自动化处理系统实施方案.md` 的目标值，当前 master 的 OCR 处理器返回占位值，
+> 尚未接入真实模型，这些指标不代表本仓库的实测结果（见上文“批量流程”注意事项）。
+
 - 整体识别准确率：≥98.5%
 - 数学公式识别准确率：≥98%
 - 化学方程式识别准确率：≥98%
@@ -105,6 +155,11 @@ filtered_results = ocr.process_with_filtering(
 ```
 ocr_module/
 ├── requirements.txt          # 依赖包列表
+├── batch_process.py          # 批量流程入口（第 1-4 步）
+├── question_restorer.py      # 题目还原模块（第 5 步）
+├── batch_paths.py            # 归档路径与运行目录布局
+├── BATCH_WORKFLOW.md         # 批量流程与归档字段说明
+├── test_batch_process.py     # 批量流程与还原模块自检
 ├── src/                     # 源代码目录
 │   ├── __init__.py          # 包初始化文件
 │   ├── main.py              # 主入口文件

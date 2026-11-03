@@ -1,1 +1,7 @@
 ocr_module/ocr_env/*
+
+# 批量流程运行产物（不提交进仓库，运行目录可整体删除）
+**/page_images/
+**/question_images/
+**/ocr_json/
+**/restored_questions.json

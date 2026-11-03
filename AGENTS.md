@@ -5,6 +5,7 @@
 - `ocr_module/src/`: OCR processing implementation.
 - `ocr_module/latex_to_image/`: LaTeX rendering implementation and lightweight tests.
 - `ocr_module/src/test/`: OCR scripts that may require models or local fixtures.
+- `ocr_module/batch_process.py` / `ocr_module/question_restorer.py`: 试卷批量流程与还原模块，运行目录与归档字段定义见 `ocr_module/BATCH_WORKFLOW.md`。
 - `doc/`: Product and architecture documents.
 
 ## Required pull request checks
